@@ -12,7 +12,7 @@ import math
 import numpy as np
 import copy
 
-def benign(device, param_list, cmax=0):
+def benign(device, lr, param_list, cmax=0):
 
     return param_list
 
@@ -68,14 +68,15 @@ def adaptive_trim(device, lr, param_list, old_direction, nbyz, fs_cut):
 
 def full_trim(device, lr, param_list, cmax=0):
 
-
     max_dim = torch.max(-param_list, axis=0)[0]
     min_dim = torch.min(-param_list, axis=0)[0]
     direction = torch.sign(torch.sum(-param_list, axis=0)).to(device)
     directed_dim = (direction > 0) * min_dim + (direction < 0) * max_dim
+    #pdb.set_trace()
     for i in range(cmax):
         random_12 = 1 + torch.rand(len(param_list[0])).to(device)
         param_list[i] = -(directed_dim * ((direction * directed_dim > 0) / random_12 + (direction * directed_dim < 0) * random_12))
+    #pdb.set_trace()
     return param_list
 
 def full_krum(device, lr, v, f):
@@ -85,7 +86,7 @@ def full_krum(device, lr, v, f):
     if (f==0):
         return v
     e = 0.0001/len(v[0])
-    direction = torch.sign(torch.sum(v, axis=0))
+    direction = torch.sign(torch.sum(-v, axis=0))
     #pdb.set_trace()
     l_max = lambda_max(device, v, f)
     l = find_lambda(l_max, v, direction, len(v), f)

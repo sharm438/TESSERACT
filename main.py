@@ -35,8 +35,8 @@ def parse_args():
     parser.add_argument("--seed", help="seed", default=42, type=int)
     parser.add_argument("--nbyz", help="# byzantines", default=2, type=int)
     parser.add_argument("--byz_type", help="type of attack", default='full_trim', type=str,
-                        choices=['benign', 'partial_trim', 'full_trim', 'full_krum'])
-    parser.add_argument("--aggregation", help="aggregation rule", default='trim', type=str)
+                        choices=['benign', 'partial_trim', 'full_trim', 'full_krum', 'adaptive_trim'])
+    parser.add_argument("--aggregation", help="aggregation rule", default='fedsgd', type=str)
     parser.add_argument("--cmax", help="FLAIR's notion of c_max", default=2, type=int)
     parser.add_argument("--decay", help="Decay rate", default=2.0, type=float)
     return parser.parse_args()
@@ -121,6 +121,15 @@ class ResNet18(nn.Module):
 
         return x
 
+class MLR(nn.Module):
+    def __init__(self, inp_dim, out_dim):
+        super(MLR, self).__init__()
+        self.linear = nn.Linear(inp_dim, out_dim)
+        
+    def forward(self, x):
+        out = self.linear(x)
+        return out
+
 class DNN(nn.Module):
     
     def __init__(self):
@@ -168,11 +177,11 @@ class LR_har(nn.Module):
         return x
         
     
-def get_lr(epoch, num_epochs):
+def get_lr(epoch, num_epochs, lr):
 
     mu = num_epochs/4
     sigma = num_epochs/4
-    max_lr = 0.1
+    max_lr = lr
     if (epoch < num_epochs/4):
         return max_lr*(1-np.exp(-25*(epoch/num_epochs)))
     else:
@@ -368,7 +377,9 @@ def main(args):
         sys.exit('Not Implemented Dataset!')
         
     ####Load models
-    if (args.net == 'resnet18'):
+    if (args.net == 'mlr'):
+        net = MLR(num_inputs, num_outputs)
+    elif (args.net == 'resnet18'):
         net = ResNet18()
     elif(args.net == 'dnn'):
         net = DNN()
@@ -383,7 +394,9 @@ def main(args):
         byz = attack.full_trim
     elif args.byz_type == 'full_krum':
         byz = attack.full_krum
-    
+    elif args.byz_type == 'adaptive_trim':
+        byz = attack.adaptive_trim
+
     if args.dataset != 'femnist':
         ####Distribute data samples
         bias_weight = args.bias
@@ -392,6 +405,8 @@ def main(args):
         each_worker_data = [[] for _ in range(num_workers)]
         each_worker_label = [[] for _ in range(num_workers)] 
         for _, (data, label) in enumerate(train_data):
+            if args.net == 'mlr':
+                data = data.reshape((-1, num_inputs))
             for (x, y) in zip(data, label):
                 upper_bound = (y.item()) * (1-bias_weight) / (num_outputs-1) + bias_weight
                 lower_bound = (y.item()) * (1-bias_weight) / (num_outputs-1)
@@ -422,6 +437,11 @@ def main(args):
     random_order = np.random.RandomState(seed=42).permutation(num_workers)
     each_worker_data = [each_worker_data[i] for i in random_order]
     each_worker_label = [each_worker_label[i] for i in random_order]
+
+    wts = torch.zeros(len(each_worker_data)).to(device)
+    for i in range(len(each_worker_data)):
+        wts[i] = len(each_worker_data[i])
+    wts = wts/torch.sum(wts)
     criterion = nn.CrossEntropyLoss()
     test_acc = np.empty(num_epochs)
     
@@ -434,28 +454,30 @@ def main(args):
     decay = args.decay
     
     batch_idx = np.zeros(num_workers)
-    
+    ben_score = []
+    mal_score = []
     for epoch in range(num_epochs):
         grad_list = []
         if (args.aggregation == 'flair'):
             susp = susp/decay
-        if (args.aggregation == 'cifar10'):
-            lr = get_lr(epoch, num_epochs)
+        if (args.dataset == 'cifar10'):
+            lr = get_lr(epoch, num_epochs, args.lr)
         for worker in range(num_workers):
             net_local = deepcopy(net) # --------------------------------------------------------------------------------------------------------------------------------------
             net_local.train()
-            #optimizer = optim.SGD(net_local.parameters(), lr=lr)
-            optimizer = optim.Adam(net_local.parameters(), lr=lr)
+            #if args.dataset != 'cifar10': 
+            optimizer = optim.SGD(net_local.parameters(), lr=lr)
+            #else: optimizer = optim.Adam(net_local.parameters(), lr=lr, weight_decay=0.000125)
             optimizer.zero_grad()
-            if args.dataset == 'mnist':
-                if (batch_idx[worker]+batch_size < each_worker_data[worker].shape[0]):
-                    minibatch = np.asarray(list(range(int(batch_idx[worker]),int(batch_idx[worker])+batch_size)))
-                    batch_idx[worker] = batch_idx[worker] + batch_size
-                else: 
-                    minibatch = np.asarray(list(range(int(batch_idx[worker]),each_worker_data[worker].shape[0]))) 
-                    batch_idx[worker] = 0
+            #if args.dataset == 'mnist':
+            if (batch_idx[worker]+batch_size < each_worker_data[worker].shape[0]):
+                minibatch = np.asarray(list(range(int(batch_idx[worker]),int(batch_idx[worker])+batch_size)))
+                batch_idx[worker] = batch_idx[worker] + batch_size
             else: 
-                minibatch = np.random.choice(list(range(each_worker_data[worker].shape[0])), size=batch_size, replace=False)
+                minibatch = np.asarray(list(range(int(batch_idx[worker]),each_worker_data[worker].shape[0]))) 
+                batch_idx[worker] = 0
+            #else: 
+            #minibatch = np.random.choice(list(range(each_worker_data[worker].shape[0])), size=batch_size, replace=False)
             output = net_local(each_worker_data[worker][minibatch].to(device))
             loss = criterion(output, each_worker_label[worker][minibatch].to(device))
             loss.backward()
@@ -468,14 +490,22 @@ def main(args):
             
         # print("Before:", net.conv1.weight, net.conv1.bias, net.fc2.weight, net.fc2.bias)
             
-        if (args.aggregation == 'mean'):
-            net = aggregation.mean(device, byz, grad_list, net) 
+        if (args.aggregation == 'fedsgd'):
+            net = aggregation.FEDSGD(device, byz, lr, grad_list, net, args.nbyz, wts) 
         elif (args.aggregation == 'flair'):
-            net, direction, susp, flip_local = aggregation.flair(device, byz, grad_list, net, direction, susp, mod=True)
+            if (epoch == 0): fs_cut = 1.0
+            else:
+                fs_cut = torch.sort(flip_local)[0][args.nworkers-args.nbyz-1]
+            net, direction, susp, flip_local = aggregation.flair(device, byz, lr, grad_list, net, direction, susp, fs_cut, args.cmax, mod=True)
+            if byz=='benign': actual_c = 0
+            else: actual_c = args.nbyz
+            ben_score.append(torch.mean(flip_local[actual_c:]))
+            mal_score.append(torch.mean(flip_local[:actual_c]))
+            print (mal_score[epoch], ben_score[epoch])
         elif (args.aggregation == 'krum'):
-            net = aggregation.krum(device, byz, grad_list, net)         
+            net = aggregation.krum(device, byz, lr, grad_list, net)         
         elif (args.aggregation == 'trim'):
-            net = aggregation.trim(device, byz, grad_list, net, args.nbyz)
+            net = aggregation.trim(device, byz, lr, grad_list, net, args.cmax)
             
         # print("After:", net.conv1.weight, net.conv1.bias,  net.fc2.weight, net.fc2.bias)
         
@@ -486,6 +516,8 @@ def main(args):
         with torch.no_grad():
             for data in test_data:
                 images, labels = data
+                if (args.net == 'mlr'):
+                    images = images.reshape((-1, num_inputs))
                 outputs = net(images.to(device))
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
@@ -493,8 +525,9 @@ def main(args):
             test_acc[epoch] = correct/total                
             print ('Epoch: %d, test_acc: %f, lr: %f' %(epoch, test_acc[epoch], lr))      
         
-    np.save('Test_acc.npy', test_acc)
-
+    np.save('Test_trim_fedsgd_acc.npy', test_acc)
+    #np.save('Ben_malk_score.npy', np.asarray(ben_score))
+    #np.save('Mal_malk_score.npy', np.asarray(mal_score))
             
 if __name__ == "__main__":
     args = parse_args()

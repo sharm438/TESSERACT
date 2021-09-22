@@ -9,11 +9,12 @@ import torch
 import numpy as np
 import torch.nn as nn
 
-def mean(device, byz, grad_list, net):
-    
+def FEDSGD(device, byz, lr, grad_list, net, nbyz, wts):
+ 
+    #print (wts)
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
-    param_list = byz(device, param_list, 2) 
-    global_params = torch.mean(param_list, dim=0)
+    param_list = byz(device, lr, param_list, nbyz) 
+    global_params = torch.matmul(torch.transpose(param_list, 0, 1), wts.reshape(-1,1))
     with torch.no_grad():
         idx = 0
         for j, (param) in enumerate(net.named_parameters()):
@@ -24,10 +25,12 @@ def mean(device, byz, grad_list, net):
 
     return net
 
-def flair(device, byz, grad_list, net, old_direction, susp, cmax=0, mod=True):
+def flair(device, byz, lr, grad_list, net, old_direction, susp, fs_cut, cmax=0, mod=True):
     
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
-    param_list = byz(device, param_list, cmax)
+    if 'adaptive' in str(byz):
+        param_list = byz(device, lr, param_list, old_direction, cmax, fs_cut)
+    else: param_list = byz(device, lr, param_list, cmax)
     flip_local = torch.zeros(len(param_list)).to(device)
     penalty = 1.0 - cmax/len(param_list)
     reward = 1.0 - penalty
@@ -46,7 +49,7 @@ def flair(device, byz, grad_list, net, old_direction, susp, cmax=0, mod=True):
             del direction, flip
 
     argsorted = torch.argsort(flip_local).to(device)
-    print (flip_local)
+    
     if (cmax > 0):
         susp[argsorted[:-cmax]] = susp[argsorted[:-cmax]] + reward
         susp[argsorted[-cmax:]] = susp[argsorted[-cmax:]] - penalty  
@@ -66,7 +69,7 @@ def flair(device, byz, grad_list, net, old_direction, susp, cmax=0, mod=True):
 
     return net, global_direction, susp, flip_local
 
-def krum(device, byz, grad_list, net, cmax=0):
+def krum(device, byz, lr, grad_list, net, cmax=0):
     
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
     
@@ -88,7 +91,7 @@ def krum(device, byz, grad_list, net, cmax=0):
     del param_list
     return net   
 
-def fltrust(device, byz, grad_list, net, tau):
+def fltrust(device, byz, lr, grad_list, net, tau):
     cos = nn.CosineSimilarity(dim=-1, eps=1e-6)
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
     server_params = param_list[0]
@@ -109,10 +112,10 @@ def fltrust(device, byz, grad_list, net, tau):
     del global_params
     return net   
 
-def trim(device, byz, grad_list, net, cmax=0): 
+def trim(device, byz, lr, grad_list, net, cmax): 
 
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
-    param_list = byz(device, param_list, cmax)
+    param_list = byz(device, lr, param_list, cmax)
     sorted_array = torch.sort(param_list, axis=0)
     trimmed = torch.mean(sorted_array[0][cmax:len(param_list)-cmax,:], axis=0)
 
