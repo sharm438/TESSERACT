@@ -38,7 +38,8 @@ def parse_args():
                         choices=['benign', 'partial_trim', 'full_trim', 'full_krum', 'adaptive_trim'])
     parser.add_argument("--aggregation", help="aggregation rule", default='fedsgd', type=str)
     parser.add_argument("--cmax", help="FLAIR's notion of c_max", default=2, type=int)
-    parser.add_argument("--decay", help="Decay rate", default=2.0, type=float)
+    parser.add_argument("--decay", help="Decay rate", default=1000.0, type=float)
+    parser.add_argument("--exp", help="Experiment name", default='', type=str)
     return parser.parse_args()
 
 class PreActBlock(nn.Module):
@@ -308,7 +309,8 @@ def main(args):
 
     batch_size = args.batch_size
     lr = args.lr
-    
+    filename = args.exp
+    print(filename)
     ###Load datasets
     if (args.dataset == 'mnist'):
         transform=transforms.Compose([
@@ -441,6 +443,8 @@ def main(args):
     wts = torch.zeros(len(each_worker_data)).to(device)
     for i in range(len(each_worker_data)):
         wts[i] = len(each_worker_data[i])
+    wts[0] = 0
+    wts[1] = 0
     wts = wts/torch.sum(wts)
     criterion = nn.CrossEntropyLoss()
     test_acc = np.empty(num_epochs)
@@ -454,8 +458,9 @@ def main(args):
     decay = args.decay
     
     batch_idx = np.zeros(num_workers)
-    ben_score = []
-    mal_score = []
+    susp_score = []
+    old_flips = []
+    new_flips = []
     for epoch in range(num_epochs):
         grad_list = []
         if (args.aggregation == 'flair'):
@@ -491,19 +496,26 @@ def main(args):
         # print("Before:", net.conv1.weight, net.conv1.bias, net.fc2.weight, net.fc2.bias)
             
         if (args.aggregation == 'fedsgd'):
-            net = aggregation.FEDSGD(device, byz, lr, grad_list, net, args.nbyz, wts) 
+            net, direction, flip_old, flip_new = aggregation.FEDSGD(device, byz, lr, grad_list, net, direction, args.nbyz, wts) 
+            old_flips.append(flip_old)
+            new_flips.append(flip_new)
+            #print(flip_old, flip_new)
         elif (args.aggregation == 'flair'):
             if (epoch == 0): fs_cut = 1.0
             else:
-                fs_cut = torch.sort(flip_local)[0][args.nworkers-args.nbyz-1]
-            net, direction, susp, flip_local = aggregation.flair(device, byz, lr, grad_list, net, direction, susp, fs_cut, args.cmax, mod=True)
+                fs_cut = torch.sort(flip_new)[0][args.nworkers-args.nbyz-1]
+            net, direction, susp, flip_old, flip_new = aggregation.flair(device, byz, lr, grad_list, net, direction, susp, fs_cut, args.cmax, mod=True)
             if byz=='benign': actual_c = 0
             else: actual_c = args.nbyz
-            ben_score.append(torch.mean(flip_local[actual_c:]))
-            mal_score.append(torch.mean(flip_local[:actual_c]))
-            print (mal_score[epoch], ben_score[epoch])
+            old_flips.append(flip_old)
+            new_flips.append(flip_new)
+            susp_score.append(susp)
+            print(flip_old, flip_new, susp)
+            #ben_score.append(torch.mean(flip_local[actual_c:]))
+            #mal_score.append(torch.mean(flip_local[:actual_c]))
+            #print (mal_score[epoch], ben_score[epoch])
         elif (args.aggregation == 'krum'):
-            net = aggregation.krum(device, byz, lr, grad_list, net)         
+            net = aggregation.krum(device, byz, lr, grad_list, net, args.nbyz)         
         elif (args.aggregation == 'trim'):
             net = aggregation.trim(device, byz, lr, grad_list, net, args.cmax)
             
@@ -525,10 +537,10 @@ def main(args):
             test_acc[epoch] = correct/total                
             print ('Epoch: %d, test_acc: %f, lr: %f' %(epoch, test_acc[epoch], lr))      
         
-    np.save('Test_trim_fedsgd_acc.npy', test_acc)
-    #np.save('Ben_malk_score.npy', np.asarray(ben_score))
-    #np.save('Mal_malk_score.npy', np.asarray(mal_score))
-            
+    np.save(filename+'_test_acc.npy', test_acc)
+    np.save(filename+'_oldFS.npy', np.asarray(old_flips))
+    np.save(filename+'_newFS.npy', np.asarray(new_flips))
+    np.save(filename+'_susp.npy', np.asarray(susp_score))        
 if __name__ == "__main__":
     args = parse_args()
     main(args)

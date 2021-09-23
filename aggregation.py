@@ -9,12 +9,28 @@ import torch
 import numpy as np
 import torch.nn as nn
 
-def FEDSGD(device, byz, lr, grad_list, net, nbyz, wts):
+def FEDSGD(device, byz, lr, grad_list, net, old_direction, nbyz, wts):
  
     #print (wts)
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
-    param_list = byz(device, lr, param_list, nbyz) 
+    #pdb.set_trace()
+    param_list = byz(device, lr, param_list, nbyz)#, old_direction) 
+    flip_local = torch.zeros(len(param_list)).to(device)
+    flip_old = torch.zeros(len(param_list)).to(device)
+    for i in range(len(param_list)):
+        direction = torch.sign(param_list[i])
+        flip = torch.sign(direction*(direction-old_direction.reshape(-1)))
+        flip_local[i] = torch.sum(flip*(param_list[i]**2))
+        flip_old[i] = 0.5*(torch.sum(direction.reshape(-1)*(direction.reshape(-1)-old_direction.reshape(-1)))).item()
+        del direction, flip
+    
     global_params = torch.matmul(torch.transpose(param_list, 0, 1), wts.reshape(-1,1))
+    global_direction = torch.sign(global_params)
+    flip = torch.sign(global_direction*(global_direction-old_direction.reshape(-1)))
+    globalFS_new = torch.sum(flip*(global_params**2))
+    globalFS_old = 0.5*(torch.sum(global_direction.reshape(-1)*(global_direction.reshape(-1)-old_direction.reshape(-1)))).item()
+    print(globalFS_old, globalFS_new, flip_old, flip_local)
+    #pdb.set_trace()
     with torch.no_grad():
         idx = 0
         for j, (param) in enumerate(net.named_parameters()):
@@ -22,8 +38,7 @@ def FEDSGD(device, byz, lr, grad_list, net, nbyz, wts):
                 param[1].data += global_params[idx:(idx+param[1].nelement())].reshape(param[1].shape)
                 idx += param[1].nelement()  
     del param_list, global_params
-
-    return net
+    return net, global_direction, flip_old, flip_local
 
 def flair(device, byz, lr, grad_list, net, old_direction, susp, fs_cut, cmax=0, mod=True):
     
@@ -32,7 +47,8 @@ def flair(device, byz, lr, grad_list, net, old_direction, susp, fs_cut, cmax=0, 
         param_list = byz(device, lr, param_list, old_direction, cmax, fs_cut)
     else: param_list = byz(device, lr, param_list, cmax)
     flip_local = torch.zeros(len(param_list)).to(device)
-    penalty = 1.0 - cmax/len(param_list)
+    flip_old = torch.zeros(len(param_list)).to(device)
+    penalty = 1.0 - 2*cmax/len(param_list)
     reward = 1.0 - penalty
 
     if mod == True:
@@ -40,6 +56,7 @@ def flair(device, byz, lr, grad_list, net, old_direction, susp, fs_cut, cmax=0, 
             direction = torch.sign(param_list[i])
             flip = torch.sign(direction*(direction-old_direction.reshape(-1)))
             flip_local[i] = torch.sum(flip*(param_list[i]**2))
+            flip_old[i] = 0.5*(torch.sum(direction.reshape(-1)*(direction.reshape(-1)-old_direction.reshape(-1)))).item()
             del direction, flip
     else:
         for i in range(len(param_list)):
@@ -49,9 +66,10 @@ def flair(device, byz, lr, grad_list, net, old_direction, susp, fs_cut, cmax=0, 
             del direction, flip
 
     argsorted = torch.argsort(flip_local).to(device)
-    
+    #print (flip_old, flip_local)
     if (cmax > 0):
-        susp[argsorted[:-cmax]] = susp[argsorted[:-cmax]] + reward
+        susp[argsorted[cmax:-cmax]] = susp[argsorted[cmax:-cmax]] + reward
+        susp[argsorted[:cmax]] = susp[argsorted[:cmax]] - penalty
         susp[argsorted[-cmax:]] = susp[argsorted[-cmax:]] - penalty  
     argsorted = torch.argsort(susp)
 
@@ -67,14 +85,14 @@ def flair(device, byz, lr, grad_list, net, old_direction, susp, fs_cut, cmax=0, 
                 idx += param[1].nelement()  
     del param_list, global_params
 
-    return net, global_direction, susp, flip_local
+    return net, global_direction, susp, flip_old, flip_local
 
-def krum(device, byz, lr, grad_list, net, cmax=0):
+def krum(device, byz, lr, grad_list, net, cmax):
     
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
-    
+    param_list = byz(device, lr, param_list, cmax) 
     k = len(param_list)-cmax-2
-    dist = torch.zeros((len(param_list), len(param_list)))
+    dist = torch.zeros((len(param_list), len(param_list))).to(device)
     for i in range(len(param_list)):
         for j in range(i):
             dist[i][j] = torch.norm(param_list[i]-param_list[j])
