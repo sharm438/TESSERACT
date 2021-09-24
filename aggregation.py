@@ -9,27 +9,27 @@ import torch
 import numpy as np
 import torch.nn as nn
 
-def FEDSGD(device, byz, lr, grad_list, net, old_direction, nbyz, wts):
+def FEDSGD(device, byz, lr, grad_list, net, nbyz, wts):
  
     #print (wts)
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
     #pdb.set_trace()
     param_list = byz(device, lr, param_list, nbyz)#, old_direction) 
-    flip_local = torch.zeros(len(param_list)).to(device)
-    flip_old = torch.zeros(len(param_list)).to(device)
-    for i in range(len(param_list)):
-        direction = torch.sign(param_list[i])
-        flip = torch.sign(direction*(direction-old_direction.reshape(-1)))
-        flip_local[i] = torch.sum(flip*(param_list[i]**2))
-        flip_old[i] = 0.5*(torch.sum(direction.reshape(-1)*(direction.reshape(-1)-old_direction.reshape(-1)))).item()
-        del direction, flip
+    #flip_local = torch.zeros(len(param_list)).to(device)
+    #flip_old = torch.zeros(len(param_list)).to(device)
+    #for i in range(len(param_list)):
+    #    direction = torch.sign(param_list[i])
+    #    flip = torch.sign(direction*(direction-old_direction.reshape(-1)))
+    #    flip_local[i] = torch.sum(flip*(param_list[i]**2))
+    #    flip_old[i] = 0.5*(torch.sum(direction.reshape(-1)*(direction.reshape(-1)-old_direction.reshape(-1)))).item()
+    #    del direction, flip
     
     global_params = torch.matmul(torch.transpose(param_list, 0, 1), wts.reshape(-1,1))
-    global_direction = torch.sign(global_params)
-    flip = torch.sign(global_direction*(global_direction-old_direction.reshape(-1)))
-    globalFS_new = torch.sum(flip*(global_params**2))
-    globalFS_old = 0.5*(torch.sum(global_direction.reshape(-1)*(global_direction.reshape(-1)-old_direction.reshape(-1)))).item()
-    print(globalFS_old, globalFS_new, flip_old, flip_local)
+    #global_direction = torch.sign(global_params)
+    #flip = torch.sign(global_direction*(global_direction-old_direction.reshape(-1)))
+    #globalFS_new = torch.sum(flip*(global_params**2))
+    #globalFS_old = 0.5*(torch.sum(global_direction.reshape(-1)*(global_direction.reshape(-1)-old_direction.reshape(-1)))).item()
+    #print(globalFS_old, globalFS_new, flip_old, flip_local)
     #pdb.set_trace()
     with torch.no_grad():
         idx = 0
@@ -38,13 +38,16 @@ def FEDSGD(device, byz, lr, grad_list, net, old_direction, nbyz, wts):
                 param[1].data += global_params[idx:(idx+param[1].nelement())].reshape(param[1].shape)
                 idx += param[1].nelement()  
     del param_list, global_params
-    return net, global_direction, flip_old, flip_local
+    #return net, global_direction, flip_old, flip_local
+    return net
 
-def flair(device, byz, lr, grad_list, net, old_direction, susp, fs_cut, cmax=0, mod=True):
+def flair(device, byz, lr, grad_list, net, old_direction, susp, fs, cmax, mod=True):
     
     param_list = torch.stack([(torch.cat([xx.reshape((-1)) for xx in x], dim=0)).squeeze(0) for x in grad_list])
+    fs_min = torch.sort(fs)[0][cmax-1]
+    fs_max = torch.sort(fs)[0][-cmax]
     if 'adaptive' in str(byz):
-        param_list = byz(device, lr, param_list, old_direction, cmax, fs_cut)
+        param_list = byz(device, lr, param_list, old_direction, cmax, fs_min, fs_max)
     else: param_list = byz(device, lr, param_list, cmax)
     flip_local = torch.zeros(len(param_list)).to(device)
     flip_old = torch.zeros(len(param_list)).to(device)

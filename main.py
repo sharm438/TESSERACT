@@ -443,8 +443,6 @@ def main(args):
     wts = torch.zeros(len(each_worker_data)).to(device)
     for i in range(len(each_worker_data)):
         wts[i] = len(each_worker_data[i])
-    wts[0] = 0
-    wts[1] = 0
     wts = wts/torch.sum(wts)
     criterion = nn.CrossEntropyLoss()
     test_acc = np.empty(num_epochs)
@@ -496,15 +494,15 @@ def main(args):
         # print("Before:", net.conv1.weight, net.conv1.bias, net.fc2.weight, net.fc2.bias)
             
         if (args.aggregation == 'fedsgd'):
-            net, direction, flip_old, flip_new = aggregation.FEDSGD(device, byz, lr, grad_list, net, direction, args.nbyz, wts) 
-            old_flips.append(flip_old)
-            new_flips.append(flip_new)
+            net = aggregation.FEDSGD(device, byz, lr, grad_list, net, args.nbyz, wts) 
+            #old_flips.append(flip_old)
+            #new_flips.append(flip_new)
             #print(flip_old, flip_new)
         elif (args.aggregation == 'flair'):
-            if (epoch == 0): fs_cut = 1.0
+            if (epoch == 0): flip_new = torch.ones(num_workers)
             else:
                 fs_cut = torch.sort(flip_new)[0][args.nworkers-args.nbyz-1]
-            net, direction, susp, flip_old, flip_new = aggregation.flair(device, byz, lr, grad_list, net, direction, susp, fs_cut, args.cmax, mod=True)
+            net, direction, susp, flip_old, flip_new = aggregation.flair(device, byz, lr, grad_list, net, direction, susp, flip_new, args.cmax, mod=True)
             if byz=='benign': actual_c = 0
             else: actual_c = args.nbyz
             old_flips.append(flip_old)

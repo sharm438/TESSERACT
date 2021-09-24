@@ -12,7 +12,7 @@ import math
 import numpy as np
 import copy
 
-def benign(device, lr, param_list, cmax=0):
+def benign(device, lr, param_list, cmax):
 
     return param_list
 
@@ -20,7 +20,7 @@ def label_flip(device, param_list, cmax=0):
 
     return param_list
 
-def adaptive_trim(device, lr, param_list, old_direction, nbyz, fs_cut):
+def adaptive_trim(device, lr, param_list, old_direction, nbyz, fs_min, fs_max):
 
     max_dim = torch.max(-param_list, axis=0)[0]
     min_dim = torch.min(-param_list, axis=0)[0]
@@ -30,23 +30,26 @@ def adaptive_trim(device, lr, param_list, old_direction, nbyz, fs_cut):
     directed_dim = (ben_direction > 0) * min_dim + (ben_direction < 0) * max_dim
 
     random_l2 = 1 + torch.rand(len(param_list[0])).to(device)
-    target_attack = directed_dim * ((ben_direction * directed_dim > 0) / random_l2 + (ben_direction * directed_dim < 0) * random_l2)
-    original_attack = deepcopy(nbyz*target_attack)
+    target_attack = -(directed_dim * ((ben_direction * directed_dim > 0) / random_l2 + (ben_direction * directed_dim < 0) * random_l2))
+
+    #original_attack = deepcopy(target_attack)
     direction = torch.sign(target_attack)
     flip = torch.sign(direction*(direction-old_direction.reshape(-1)))
     flip_score = torch.sum(flip*(target_attack**2))
-    print ("Target attack has FS = %.6f but FScut = %.6f" %(flip_score, fs_cut))
+    print ("Target attack has FS = %.6f but FScut = %.6f" %(flip_score, fs_max))
     topk = torch.argsort(torch.abs(ben_grads).reshape(-1))
-    test_attack = deepcopy(original_attack)
+    #test_attack = deepcopy(original_attack)
 
-    if (flip_score < fs_cut):
-        for i in range(nbyz):
-            random_l2 = 1 + torch.rand(len(param_list[0])).to(device)
-            param_list[i] = directed_dim * ((direction * directed_dim > 0) / random_l2 + (direction * directed_dim < 0) *random_l2)
+    for i in range(nbyz):
+        random_l2 = 1 + torch.rand(len(param_list[0])).to(device)
+        param_list[i] = -(directed_dim * ((direction * directed_dim > 0) / random_l2 + (direction * directed_dim < 0) *random_l2))
+    if (flip_score < fs_max):
+        print("No adapting required")
+        return param_list
     else:
         for i in range(nbyz):
-            if (torch.sum(test_attack) == 0):
-                test_attack = deepcopy(original_attack/nbyz)
+            #if (torch.sum(test_attack) == 0):
+            test_attack = deepcopy(param_list[i])
             step = 5 #undo attack on 5% of the gradients at a time
             for perc in range (0, 100, step):
                 start_idx = round((perc/100)*len(topk))
@@ -55,18 +58,20 @@ def adaptive_trim(device, lr, param_list, old_direction, nbyz, fs_cut):
                 direction = torch.sign(test_attack)
                 flip = torch.sign(direction*(direction-old_direction.reshape(-1)))
                 flip_score = torch.sum(flip*(test_attack**2))
-                if (flip_score < fs_cut):
-                    #print("Flip score of mal client %d after undoing %d percent parameters is %.2f" %(i, perc, flip_score))
+                if (flip_score < fs_max):
+                    diff = param_list[i] - test_attack
+                    param_list[i] = deepcopy(test_attack)
+                    
+                    if (i+1 < nbyz):
+                        param_list[i+1] = param_list[i+1] + diff
+                        fs_rem = torch.sum((torch.sign(torch.sign(param_list[i+1])*(torch.sign(param_list[i+1])-old_direction.reshape(-1))))*(param_list[i+1]**2))
+                    
+                        print("i = %d, flip score of remaining attack is %.2f" %(i+1,fs_rem)) 
                     break
-            param_list[i] = deepcopy(test_attack)
-            target_attack = target_attack - test_attack
-            test_attack = deepcopy(target_attack)
-            fs_rem = torch.sum((torch.sign(torch.sign(test_attack)*(torch.sign(test_attack)-old_direction.reshape(-1))))*(test_attack**2))
-            #print("FLip score of remaining attack is %.2f" %fs_rem) 
         #pdb.set_trace()
     return param_list
 
-def full_trim(device, lr, param_list, cmax)#, old_direction):
+def full_trim(device, lr, param_list, cmax):#, old_direction):
 
     max_dim = torch.max(-param_list, axis=0)[0]
     min_dim = torch.min(-param_list, axis=0)[0]
